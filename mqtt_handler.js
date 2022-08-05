@@ -13,106 +13,12 @@ const { EventHubProducerClient } = require("@azure/event-hubs");
 const AZURE_EVENT_HUB_CONNECTION_STRING = process.env.AZURE_EVENT_HUB_CONNECTION_STRING;
 const AZURE_EVENT_HUB_NAME = process.env.AZURE_EVENT_HUB_NAME;
 const producer = new EventHubProducerClient(AZURE_EVENT_HUB_CONNECTION_STRING, AZURE_EVENT_HUB_NAME);
-
-let sensors_list = [];
-
-let open = true;
-
 let gate = [];
-
-mqttClient.on('connect', () => {
-  console.log(`mqtt client connected`);
-  db.postgres.query(
-    `
-      select s.id, s.content ->> 'serial_id' as serial_id, s.content as sensor, sa.content -> 'scene' as scene from sensors s
-      inner join samdt sa on s.id = CAST (sa."content" ->> 'feeder_id' AS INTEGER)
-      where s."content" ->> 'serial_id' in ('Q2TV-ND7F-9DHJ', 'Q2TV-9PBP-ZFY3', 'Q2MV-RLRY-Q5HY', 'Q2MV-GTGY-PB5D', 'Q2MV-FVHP-5QKB', 'Q2JV-H5GQ-JBM2')
-    `,
-    {
-      raw: true,
-      type: QueryTypes.SELECT,
-    }
-  ).then(async (result) => {
-    sensors_list = result;
-    mqttClient.subscribe('/merakimv/Q2TV-ND7F-9DHJ/custom_analytics');
-    mqttClient.subscribe('/merakimv/Q2TV-9PBP-ZFY3/custom_analytics');
-    // mqttClient.subscribe('/merakimv/Q2MV-RLRY-Q5HY/custom_analytics');
-    // mqttClient.subscribe('/merakimv/Q2MV-GTGY-PB5D/custom_analytics');
-    // mqttClient.subscribe('/merakimv/Q2MV-FVHP-5QKB/custom_analytics');
-    mqttClient.subscribe('/merakimv/Q2JV-H5GQ-JBM2/custom_analytics');
-  })
-  .catch((err) => {
-    console.log("error fetching sensor details");
-  });
-})
-
-mqttClient.on('message', async (topic, message) => {
-  if (global_database_connected) {
-    let mqtt_data = JSON.parse(message.toString());
-    let edtHour = moment(parseInt(mqtt_data.timestamp)).hours() - 4;
-
-    if (mqtt_data.outputs.length > 0) {
-      if (edtHour > 3 && edtHour < 21) {
-        let serial_id = topic.split('/')[2];
-        let index = sensors_list.map(s => s.serial_id).indexOf(serial_id);
-        let sensor_data = sensors_list[index];
-    
-        let data_to_send = {
-          timestamp: mqtt_data.timestamp,
-          outputs: mqtt_data.outputs,
-          serial_id,
-          scene: sensor_data.scene,
-          sensor: sensor_data.sensor
-        }
-  
-        if (!gate.find(i => i === serial_id)) {
-          console.log(`saving detection - EDT hour is ${edtHour} - ${moment(parseInt(mqtt_data.timestamp))}`);
-          // open = false;
-          gate.push(serial_id)
-          db.mqtt_detections.create({
-            serial_id,
-            api_key: process.env.API_KEY,
-            snapshot_generated: false,
-            track_object: data_to_send.outputs,
-            timestamp_str: data_to_send.timestamp,
-            processing: false,
-            timestamp_date: moment(data_to_send.timestamp).toISOString(),
-            type: {
-              name: 'pullup_window_tool'
-            }
-          })
-          .then(res => {
-            setTimeout(() => {
-              gate.splice(gate.indexOf(serial_id), 1);
-            }, 5000)
-          })
-        }
-  
-        // try {
-        //   const batch = await producer.createBatch();
-        //   batch.tryAdd({ 
-        //       body: data_to_send
-        //   });
-      
-        //   await producer.sendBatch(batch);
-        //   console.log(`sent topic ${topic}`);
-        // } catch (error) {
-        //   console.log('error when sending to event hub ', error)
-        // }
-      } else {
-        console.log(`rejected - current edt hour is ${edtHour} - ${moment(parseInt(mqtt_data.timestamp))}`);
-      }
-    } else {
-      console.log('data has no output')
-    }
-  }
-})
 
 mqttClient.on('close', () => {
   console.log(`mqtt client disconnected`);
   mqttClient.reconnect();
 });
-
 
 mqttClient.on('reconnect', () => {
   console.log(`mqtt client reconnected`);
@@ -122,5 +28,80 @@ mqttClient.on('error', (err) => {
   console.log('mqtt error ', err);
   mqttClient.reconnect();
 });
+
+mqttClient.on('connect', () => {
+  console.log(`mqtt client connected`);
+  db.postgres.query(
+    `
+      select ms.type, s.id, s.content ->> 'api_key' as api_key, s.content ->> 'serial_id' as serial_id, s.content as sensor, sa.content -> 'scene' as scene from sensors s
+      inner join samdt sa on s.id = CAST (sa."content" ->> 'feeder_id' AS INTEGER)
+      inner join mqtt_sensors ms on ms.id = sa.id
+      where s."content" ->> 'serial_id' in (select content ->> 'serial_id' as serial_id from mqtt_sensors)
+    `,
+    {
+      raw: true,
+      type: QueryTypes.SELECT,
+    }
+  ).then(async (result) => {
+    global_mqtt_sensors_list = result;
+    mqttClient.subscribe('/merakimv/+/custom_analytics');
+
+    // mqttClient.subscribe('/merakimv/Q2TV-ND7F-9DHJ/custom_analytics');
+    // mqttClient.subscribe('/merakimv/Q2TV-9PBP-ZFY3/custom_analytics');
+    // mqttClient.subscribe('/merakimv/Q2MV-RLRY-Q5HY/custom_analytics');
+    // mqttClient.subscribe('/merakimv/Q2MV-GTGY-PB5D/custom_analytics');
+    // mqttClient.subscribe('/merakimv/Q2MV-FVHP-5QKB/custom_analytics');
+    // mqttClient.subscribe('/merakimv/Q2JV-H5GQ-JBM2/custom_analytics');
+  })
+  .catch((err) => {
+    console.log("error fetching sensor details");
+  });
+})
+
+mqttClient.on('message', async (topic, message) => {
+  if (global_database_connected) {
+    let mqtt_data = JSON.parse(message.toString());
+    let edtHour = moment(parseInt(mqtt_data.timestamp)).utc().hours() - 4;
+    let serial_id = topic.split('/')[2];
+    
+    //check if topic is inside global_mqtt_sensors_list
+    if (global_mqtt_sensors_list.find(s => s.serial_id === serial_id)) {
+      if (mqtt_data && mqtt_data.outputs && mqtt_data.outputs.length > 0) {
+        let serial_id = topic.split('/')[2];
+        let index = global_mqtt_sensors_list.map(s => s.serial_id).indexOf(serial_id);
+        let sensor_data = global_mqtt_sensors_list[index];
+
+        if (sensor_data.type.name === 'Starbucks' && [1,2,3,21,22,23,24].includes(edtHour)) {
+          console.log(`REJECTED - detection edt hour is ${edtHour} - ${moment(parseInt(mqtt_data.timestamp))}`);
+        } else {
+          if (!gate.find(i => i === serial_id)) {
+            console.log(`SAVING - detection EDT hour is ${edtHour} - ${moment(parseInt(mqtt_data.timestamp))}`);
+            gate.push(serial_id)
+            db.mqtt_detections.create({
+              serial_id,
+              api_key: sensor_data.api_key,
+              snapshot_generated: false,
+              track_object: mqtt_data.outputs,
+              timestamp_str: mqtt_data.timestamp,
+              processing: false,
+              timestamp_date: moment(mqtt_data.timestamp).toISOString(),
+              type: {
+                name: sensor_data.type
+              }
+            })
+            .then(res => {
+              setTimeout(() => {
+                gate.splice(gate.indexOf(serial_id), 1);
+              }, 10000)
+            })
+          }
+        }
+      } else {
+        console.log(topic, ' - message has no output')
+      }
+    }
+  }
+})
+
 
 module.exports = mqttClient;

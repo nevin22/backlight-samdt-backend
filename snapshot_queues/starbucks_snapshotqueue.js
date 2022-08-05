@@ -6,26 +6,27 @@ const { BlobServiceClient, StorageSharedKeyCredential } = require("@azure/storag
 const AZURE_STORAGE_CONNECTION_STRING = process.env.AZURE_STORAGE_CONNECTION_STRING;
 
 module.exports = async () => {
-    const db = require('./database/viana');
+    const db = require('../database/viana');
     await db.postgres.query(
     `
-    SELECT
-        ss.id,
-        ss.timestamp_str,
-        ss.api_key,
-        ss.serial_id,
-        ss.track_object,
-        ss.image_url,
-        ss."createdAt"
-    FROM mqtt_detections ss
-    WHERE
-        "createdAt" > '2022-06-03 00:00:00' AND
-        ss."snapshot_generated" = false AND
-        (ss.processing != true OR ss.processing IS NULL) AND
-        (ss.retry_count < 50  OR ss.retry_count IS NULL) AND
-        extract(epoch from (now()::timestamp -  "createdAt")) > 120
-    ORDER BY "timestamp_str" ASC
-    LIMIT 4
+        SELECT
+            ss.id,
+            ss.timestamp_str,
+            ss.api_key,
+            ss.serial_id,
+            ss.track_object,
+            ss.image_url,
+            ss."createdAt"
+        FROM mqtt_detections ss
+        WHERE
+            ss.type ->> 'name' = 'Starbucks' AND
+            "createdAt" > '2022-06-03 00:00:00' AND
+            ss."snapshot_generated" = false AND
+            (ss.processing != true OR ss.processing IS NULL) AND
+            (ss.retry_count < 50  OR ss.retry_count IS NULL) AND
+            extract(epoch from (now()::timestamp -  "createdAt")) > 120
+        ORDER BY "timestamp_str" ASC
+        LIMIT 4
     `,
     {
         raw: true,
@@ -55,6 +56,7 @@ module.exports = async () => {
                         return response.data.url;
                     })
                     .catch(function (error) {
+                        console.log('Starbucks - 1', error);
                         setProcessingStatus([ss.id], false).then(d => {
                             let additionalMessage = error.response && error.response.data && error.response.data.errors || [];
                             console.log(`[${ss.id} - ${ss.createdAt}] ${error.message}, ${[...additionalMessage].join()}`);
@@ -77,27 +79,26 @@ module.exports = async () => {
                             blockBlobClient.upload(arraybuffer.data, Buffer.byteLength(arraybuffer.data));
                             await new Promise(resolve => setTimeout(resolve, 1000));
                             
-                            let output = ss.track_object[0];
-                            
-                            let lpr_result = {};
-                            try {
-                                res = await axios.post(`${process.env.GNC_URL}/snapper_lpr_detection`, {
-                                    "id": 0,
-                                    "url": blockBlobClient.url,
-                                    "objects" :{
-                                        "oid": 1,
-                                        "x0" : output.location[0],
-                                        "x1" : output.location[1],
-                                        "y0" : output.location[2],
-                                        "y1" : output.location[3]
-                                    }
-                                })
-                                lpr_result = res.data.result;
-                            } catch (error) {
-                                lpr_result = {
-                                    error: error.message
-                                }
-                            }
+                            let attributes = { status: "paused" };
+                            // let output = ss.track_object[0];
+                            // try {
+                            //     res = await axios.post(`${process.env.GNC_URL}/snapper_lpr_detection`, {
+                            //         "id": 0,
+                            //         "url": blockBlobClient.url,
+                            //         "objects" :{
+                            //             "oid": 1,
+                            //             "x0" : output.location[0],
+                            //             "x1" : output.location[1],
+                            //             "y0" : output.location[2],
+                            //             "y1" : output.location[3]
+                            //         }
+                            //     })
+                            //     attributes = res.data.result;
+                            // } catch (error) {
+                            //     attributes = {
+                            //         error: error.message
+                            //     }
+                            // }
 
                             await db.postgres.query(
                                 `
@@ -105,7 +106,7 @@ module.exports = async () => {
                                     SET
                                         "updatedAt" = CURRENT_TIMESTAMP,
                                         snapshot_generated = true,
-                                        lpr_result = '${JSON.stringify(lpr_result)}',
+                                        attributes = '${JSON.stringify(attributes)}',
                                         image_url='${blockBlobClient.url}'
                                     where
                                         id = ${ss.id}
@@ -121,6 +122,8 @@ module.exports = async () => {
                                 reject(err.message);
                             })
                         }).catch(error => {
+                            console.log('Starbucks - 2', error.message);
+                            console.log(imageUrl)
                             setProcessingStatus([ss.id], false).then(d => {
                                 let additionalMessage = error.response && error.response.data && error.response.data.errors || [];
                                 console.log(`[${ss.id} - ${ss.createdAt}] ${error.message}, ${[...additionalMessage].join()}`);
@@ -133,10 +136,10 @@ module.exports = async () => {
             }))
             .then((results) => {
                 let fulfilled = results.filter(data => data.status === 'fulfilled');
-                console.log(`${fulfilled.length} out of ${tracks.length} request has ${fulfilled.length > 1 ? 'there' : 'its'} image${fulfilled.length > 1 ? 's' : ''} stored to database.`);
+                console.log(`STARBUCKS - ${fulfilled.length} out of ${tracks.length} request has ${fulfilled.length > 1 ? 'there' : 'its'} image${fulfilled.length > 1 ? 's' : ''} stored to database.`);
             })
         } else {
-            console.log('No snapshot on queue')
+            console.log('No snapshot on STARBUCKS queue')
         }
     }).catch(err => {
         console.log('ERROR: ', err);
@@ -144,7 +147,7 @@ module.exports = async () => {
 }
 
 let setProcessingStatus = (ids, processing, retry_count) => {
-    const db = require('./database/viana');
+    const db = require('../database/viana');
     let retry_count_to_add = retry_count || 1;
 
     return new Promise((resolve, reject) => {

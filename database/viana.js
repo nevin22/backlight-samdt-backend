@@ -5,10 +5,12 @@ var fs = require('fs');
 var db = {};
 require('dotenv').config();
 const schedule = require('node-schedule');
-const snapshot_queue = require('../snapshotqueue');
+const starbucks_snapshotqueue = require('../snapshot_queues/starbucks_snapshotqueue');
+const pandora_snapshotqueue = require('../snapshot_queues/pandora_snapshotqueue');
 
 const conn = qs.parse(process.env.postgresConnection, ' ', '=');
 
+console.log(conn);
 const postgresConnection = new Sequelize(
     conn.dbname, 
     conn.user, 
@@ -45,7 +47,8 @@ const postgresConnection = new Sequelize(
 postgresConnection
   .authenticate()
   .then(() => {
-    schedule.scheduleJob('*/10 * * * * *', snapshot_queue);
+    schedule.scheduleJob('*/10 * * * * *', starbucks_snapshotqueue);
+    schedule.scheduleJob('*/10 * * * * *', pandora_snapshotqueue);
     global_database_connected = true;
     console.log('Connection to PostgreSQL has been established successfully.');
   })
