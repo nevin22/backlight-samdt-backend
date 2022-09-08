@@ -1,14 +1,29 @@
+require("dotenv").config();
 var express = require("express");
 var bodyParser = require("body-parser");
 var app = express();
 const path = require('path');
-var mqttHandler = require('./mqtt_handler');
+const databrix_client = require('./databricks');
+const cors = require('cors');
+
+const corsOption = {
+    origin: ['http://localhost:3000'],
+};
+app.use(cors(corsOption));
+
+
+
+
+databrix_client.initiate_connection();
+
 
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }))
 
-global.global_database_connected = false;
-global.global_mqtt_sensors_list = [];
+global.global_allow_snapper_execution = true;
+
+const detectionRouter = require('./routes/detections');
+app.use('/detections', detectionRouter);
 
 app.use(function(req, res, next){
   console.log('%s %s', req.method, req.url);
@@ -29,10 +44,7 @@ app.get('/', function (req, res) {
   res.sendFile(path.join(__dirname, 'build', 'index.html'));
 })
 
-const detectionRouter = require('./routes/detections');
-const sensorsRouter = require('./routes/sensors');
-app.use(detectionRouter);
-app.use('/sensors', sensorsRouter);
+
 
 app.listen(8080, function () {
   console.log("app running on port ", 8080);

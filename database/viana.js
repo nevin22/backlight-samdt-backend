@@ -47,8 +47,8 @@ const postgresConnection = new Sequelize(
 postgresConnection
   .authenticate()
   .then(() => {
-    schedule.scheduleJob('*/10 * * * * *', starbucks_snapshotqueue);
-    schedule.scheduleJob('*/10 * * * * *', pandora_snapshotqueue);
+    // schedule.scheduleJob('*/10 * * * * *', starbucks_snapshotqueue);
+    // schedule.scheduleJob('*/10 * * * * *', pandora_snapshotqueue);
     global_database_connected = true;
     console.log('Connection to PostgreSQL has been established successfully.');
   })

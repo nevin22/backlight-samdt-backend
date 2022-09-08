@@ -9,7 +9,9 @@
   "dependencies": {
     "@azure/event-hubs": "^5.8.0",
     "@azure/storage-blob": "^12.10.0",
+    "@databricks/sql": "^0.1.8-beta.1",
     "axios": "^0.24.0",
+    "cors": "^2.8.5",
     "dotenv": "^10.0.0",
     "express": "^4.17.1",
     "moment": "^2.29.3",
@@ -17,6 +19,5 @@
     "node-schedule": "^2.1.0",
     "pg": "^8.7.1",
     "sequelize": "^6.6.5"
-  },
-  "devDependencies": {}
+  }
 }
