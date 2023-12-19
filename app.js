@@ -3,7 +3,8 @@ var express = require("express");
 var bodyParser = require("body-parser");
 var app = express();
 const path = require('path');
-const databrix_client = require('./databricks');
+// const databrix_client = require('./databricks');
+const snowflake_client = require('./snowflake');
 const cors = require('cors');
 
 const corsOption = {
@@ -14,13 +15,12 @@ app.use(cors(corsOption));
 
 
 
-databrix_client.initiate_connection();
-
+// databrix_client.initiate_connection();
+snowflake_client.initiate_connection();
 
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }))
 
-global.global_allow_snapper_execution = true;
 
 const detectionRouter = require('./routes/detections');
 app.use('/detections', detectionRouter);
@@ -43,8 +43,6 @@ app.use(function (req, res, next) {
 app.get('/', function (req, res) {
   res.sendFile(path.join(__dirname, 'build', 'index.html'));
 })
-
-
 
 app.listen(8080, function () {
   console.log("app running on port ", 8080);
