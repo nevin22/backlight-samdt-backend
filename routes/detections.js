@@ -4,7 +4,14 @@ var moment = require('moment');
 const snowflake_client = require('../snowflake');
 
 router.get("/samdt_list", async (req, res) => {
-    snowflake_client.execute_query(`
+    let filters = (req.query.filters && JSON.parse(req.query.filters)) || undefined;
+
+    if (filters === undefined) {
+        res.status(500).json({
+            message: "No filter"
+        });
+    } else {
+        snowflake_client.execute_query(`
         SELECT
             JOURNEY_ID,
             ARRAY_AGG(
@@ -30,11 +37,16 @@ router.get("/samdt_list", async (req, res) => {
                 OR 
                 (JOURNEY_ID IS NULL AND VALIDATED_JOURNEY IS NOT NULL)
             )
+            AND NETWORK_NAME = '${filters.network}'
+            AND SITE_NAME = '${filters.site}'
         GROUP BY JOURNEY_ID
         ORDER BY MAX(CASE WHEN ORDER_INDEX = 0 THEN ENTER_TIMESTAMP END) DESC
     `, (err, rows) => {
         if (err) {
             console.log('error executing snowflake query -', err);
+            res.status(500).json({
+                message: "Internal server error"
+            });
         }
         let validatedFlattenedDataList = rows.reduce((accumulator, journey) => {
             const validatedEntries = journey.DATA.filter(entry => entry.IS_VALIDATED);
@@ -43,43 +55,109 @@ router.get("/samdt_list", async (req, res) => {
 
         let filteredRows = rows.filter(d => d.JOURNEY_ID !== null); // removed ang mga walay journey_id kay maguba ang list (igo ra sya gyd gi gamit pra ma add sa validated na data)
 
-        filteredRows.forEach((journey) => {
-            // verify if validated
-            if (journey.DATA.find(d => d.IS_VALIDATED)) { // check lang any sa data if naay validated
-                journey.DATA.forEach((dataObj) => {
-                    let validatedData = validatedFlattenedDataList.find((v) => ((v.VALIDATED_JOURNEY === dataObj.JOURNEY_ID) && (v.SCENE_NAME === dataObj.SCENE_NAME)))
-                    // console.log('dataObj', dataObj)
-                    // console.log('validatedData', validatedData)
-                    dataObj.VALIDATED_IMAGE_URL = validatedData.IMAGE_URL;
-                    dataObj.VALIDATED_ENTER_TIMESTAMP = validatedData.ENTER_TIMESTAMP;
-                    dataObj.VALIDATED_EXIT_TIMESTAMP = validatedData.EXIT_TIMESTAMP;
+        // filteredRows.forEach((journey) => {
+        //     // verify if validated
+        //     if (journey.DATA.find(d => d.IS_VALIDATED)) { // check lang any sa data if naay validated
+        //         console.log('journey.DATA', journey.DATA)
+        //         journey.DATA.forEach((dataObj) => {
+        //             let validatedData = validatedFlattenedDataList.find((v) => ((v.VALIDATED_JOURNEY === dataObj.JOURNEY_ID) && (v.SCENE_NAME === dataObj.SCENE_NAME)))
+        //             console.log('dataObj', dataObj)
+        //             console.log('validatedData', validatedData)
+        //             dataObj.VALIDATED_IMAGE_URL = validatedData.IMAGE_URL;
+        //             dataObj.VALIDATED_ENTER_TIMESTAMP = validatedData.ENTER_TIMESTAMP;
+        //             dataObj.VALIDATED_EXIT_TIMESTAMP = validatedData.EXIT_TIMESTAMP;
+        //         })
+        //     }
+        // });
+
+        let table_columns = tableColumns(filteredRows);
+        let tableColumnNames = table_columns.map(d => d.sceneName);
+        
+        filteredRows.forEach(data => { // if kulang ang row ug isa ka item.. butngan natog skeleton lang 
+            if (data.DATA.length !== tableColumnNames.length) {
+                let dataScenes = data.DATA.map( d => d.SCENE_NAME);
+                const scenesNotInTableColumns = tableColumnNames.filter(item => !dataScenes.includes(item));
+
+                scenesNotInTableColumns.forEach(d => {
+                    data.DATA.push({
+                        ...data.DATA[0],
+                        SMALL_CIRCLE_ID: undefined,
+                        IMAGE_URL: undefined,
+                        ENTER_TIMESTAMP: undefined,
+                        EXIT_TIMESTAMP: undefined,
+                        VALIDATED_JOURNEY: undefined,
+                        SCENE_NAME: d,
+                        ORDER_INDEX: table_columns.find(d2 => d2.sceneName === d).index,
+                        NO_DATA: true
+                    })
                 })
             }
-        });
-            
-        console.log('filteredRows', filteredRows)
+        })
+        
+        validatedFlattenedDataList.forEach((validatedData) => {
+            let toUpdateIndex = filteredRows.findIndex(d => d.JOURNEY_ID === validatedData.VALIDATED_JOURNEY);
+            let dataIndex =  filteredRows[toUpdateIndex].DATA.findIndex(d => ((d.JOURNEY_ID === validatedData.VALIDATED_JOURNEY) && (d.SCENE_NAME === validatedData.SCENE_NAME)));
+            filteredRows[toUpdateIndex].DATA[dataIndex] = {
+                ...filteredRows[toUpdateIndex].DATA[dataIndex],
+                VALIDATED_IMAGE_URL: validatedData.IMAGE_URL,
+                VALIDATED_ENTER_TIMESTAMP: validatedData.ENTER_TIMESTAMP,
+                VALIDATED_EXIT_TIMESTAMP: validatedData.EXIT_TIMESTAMP,
+                IS_VALIDATED: true, // this is for frontend purpose only
+                VALIDATED_JOURNEY: validatedData.VALIDATED_JOURNEY, // this is for frontend purpose only
+                IS_VALIDATED_FULL_JOURNEY: true, // this is for frontend purpose only
+                IS_FOR_PUBLISH_FULL_JOURNEY: validatedData.FOR_PUBLISH, // this is for frontend purpose only
+                NO_DATA: false
+            }
+        })
+
         res.status(200).json({
             detections: filteredRows,
             message: "Success",
         });
     })
+    }
+
 })
+
+let tableColumns = (filteredRows) => {
+    const sceneNamesByIndex = {};
+    filteredRows.forEach(journey => {
+        journey.DATA.forEach(entry => {
+            const index = parseInt(entry.ORDER_INDEX);
+            const sceneName = entry.SCENE_NAME;
+
+            if (!sceneNamesByIndex[index]) {
+                sceneNamesByIndex[index] = sceneName;
+            }
+        });
+    });
+
+    const result = Object.keys(sceneNamesByIndex).map(index => {
+        return { index: parseInt(index), sceneName: sceneNamesByIndex[index] };
+    });
+
+    return result.sort((a, b) => b.index - a.index);
+}
+
 
 router.post("/validate_data", async (req, res) => {
     let payload = req.body.body;
+
+    console.log('payload', payload);
     if (payload.isValidated === true) { // meaning gina revalidate
         // first remove tong iyang gipang validate pra ma lisdan
-        console.log('111')
         snowflake_client.execute_query(`
             UPDATE backlight_samdt
             SET VALIDATED_JOURNEY = null, IS_VALIDATED = false
             WHERE VALIDATED_JOURNEY = '${payload.selected_data.JOURNEY_ID}'
         `, (err, result) => {
             // update daun
+            let fov_names = Object.keys(payload.small_circle_ids)
+            let sm_ids = fov_names.map(d => payload.small_circle_ids[`${d}`])
             snowflake_client.execute_query(`
                 UPDATE backlight_samdt
                 SET VALIDATED_JOURNEY = '${payload.selected_data.JOURNEY_ID}', IS_VALIDATED = true
-                WHERE small_circle_id in ('${payload.small_circle_ids.puw}', '${payload.small_circle_ids.ylane}', '${payload.small_circle_ids.orderpoint}', '${payload.small_circle_ids.entrance}');
+                WHERE small_circle_id in (${sm_ids.map(value => `'${value}'`).join(', ')})
             `, (err, result) => {
                 if (err) {
                     console.log('error executing snowflake query -', err);
@@ -95,9 +173,11 @@ router.post("/validate_data", async (req, res) => {
                         CONCAT(IMAGE_URL, '${process.env.SAMDT_SAS_TOKEN}') as VALIDATED_IMAGE_URL,
                         IS_VALIDATED,
                         SCENE_NAME,
-                        SMALL_CIRCLE_ID
+                        SMALL_CIRCLE_ID,
+                        ORDER_INDEX,
+                        true as IS_VALIDATED_FULL_JOURNEY
                     FROM backlight_samdt
-                    WHERE small_circle_id in ('${payload.small_circle_ids.puw}', '${payload.small_circle_ids.ylane}', '${payload.small_circle_ids.orderpoint}', '${payload.small_circle_ids.entrance}');
+                    WHERE small_circle_id in (${sm_ids.map(value => `'${value}'`).join(', ')});
                 `, (err, result2) => {
                     res.status(200).json({
                         updatedData: result2,
@@ -107,15 +187,16 @@ router.post("/validate_data", async (req, res) => {
             })
         })
     } else {
+        let fov_names = Object.keys(payload.small_circle_ids)
+        let sm_ids = fov_names.map(d => payload.small_circle_ids[`${d}`])
         snowflake_client.execute_query(`
             UPDATE backlight_samdt
             SET VALIDATED_JOURNEY = '${payload.selected_data.JOURNEY_ID}', IS_VALIDATED = true
-            WHERE small_circle_id in ('${payload.small_circle_ids.puw}', '${payload.small_circle_ids.ylane}', '${payload.small_circle_ids.orderpoint}', '${payload.small_circle_ids.entrance}');
+            WHERE small_circle_id in (${sm_ids.map(value => `'${value}'`).join(', ')})
         `, (err, result) => {
             if (err) {
                 console.log('error executing snowflake query -', err);
             }
-            console.log('res', result)
             snowflake_client.execute_query(`
                 SELECT
                     JOURNEY_ID,
@@ -127,9 +208,11 @@ router.post("/validate_data", async (req, res) => {
                     CONCAT(IMAGE_URL, '${process.env.SAMDT_SAS_TOKEN}') as VALIDATED_IMAGE_URL,
                     IS_VALIDATED,
                     SCENE_NAME,
-                    SMALL_CIRCLE_ID
+                    SMALL_CIRCLE_ID,
+                    ORDER_INDEX,
+                    true as IS_VALIDATED_FULL_JOURNEY
                 FROM backlight_samdt
-                WHERE small_circle_id in ('${payload.small_circle_ids.puw}', '${payload.small_circle_ids.ylane}', '${payload.small_circle_ids.orderpoint}', '${payload.small_circle_ids.entrance}');
+                WHERE small_circle_id in (${sm_ids.map(value => `'${value}'`).join(', ')});
             `, (err, result2) => {
                 res.status(200).json({
                     updatedData: result2,
@@ -141,140 +224,70 @@ router.post("/validate_data", async (req, res) => {
 })
 
 router.get("/samdt_edit_list", async (req, res) => {
-    let puw = JSON.parse(req.query.data.find(data => JSON.parse(data).SCENE_NAME === 'Scene Pull Up Window'));
-    let ylane = JSON.parse(req.query.data.find(data => JSON.parse(data).SCENE_NAME === 'Scene Y Lane Merge'));
-    let orderpoint = JSON.parse(req.query.data.find(data => JSON.parse(data).SCENE_NAME === 'Scene Order Point Outside Lane'));
-    let entrance = JSON.parse(req.query.data.find(data => JSON.parse(data).SCENE_NAME === 'Scene Entrance Outside Lane'));
+    let parsedData = req.query.data.map(d => JSON.parse(d))
+    let parseDataScenes = parsedData.map(d => d.SCENE_NAME);
 
-    snowflake_client.execute_query(`
-    (
-        SELECT
-            JOURNEY_ID,
-            ENTER_TIMESTAMP,
-            EXIT_TIMESTAMP,
-            CONCAT(IMAGE_URL, '${process.env.SAMDT_SAS_TOKEN}') as IMAGE_URL,
-            IS_VALIDATED,
-            SCENE_NAME,
-            SMALL_CIRCLE_ID,
-            COALESCE(VALIDATED_JOURNEY, '') AS VALIDATED_JOURNEY
-        FROM backlight_samdt
-        WHERE IS_VALIDATED <> TRUE AND ENTER_TIMESTAMP > '${puw.ENTER_TIMESTAMP}' AND SCENE_NAME = '${puw.SCENE_NAME}'
-        order by ENTER_TIMESTAMP ASC
-        LIMIT 10
-    )
-    UNION ALL
-    (
-        SELECT
-            JOURNEY_ID,
-            ENTER_TIMESTAMP,
-            EXIT_TIMESTAMP,
-            CONCAT(IMAGE_URL, '${process.env.SAMDT_SAS_TOKEN}') as IMAGE_URL,
-            IS_VALIDATED,
-            SCENE_NAME,
-            SMALL_CIRCLE_ID,
-            COALESCE(VALIDATED_JOURNEY, '') AS VALIDATED_JOURNEY
-        FROM backlight_samdt
-        WHERE IS_VALIDATED <> TRUE AND ENTER_TIMESTAMP < '${puw.ENTER_TIMESTAMP}' AND SCENE_NAME = '${puw.SCENE_NAME}'
-        order by ENTER_TIMESTAMP DESC
-        LIMIT 10
-    )
-    UNION ALL
-    (
-        SELECT
-            JOURNEY_ID,
-            ENTER_TIMESTAMP,
-            EXIT_TIMESTAMP,
-            CONCAT(IMAGE_URL, '${process.env.SAMDT_SAS_TOKEN}') as IMAGE_URL,
-            IS_VALIDATED,
-            SCENE_NAME,
-            SMALL_CIRCLE_ID,
-            COALESCE(VALIDATED_JOURNEY, '') AS VALIDATED_JOURNEY
-        FROM backlight_samdt
-        WHERE IS_VALIDATED <> TRUE AND ENTER_TIMESTAMP > '${ylane.ENTER_TIMESTAMP}' AND SCENE_NAME = '${ylane.SCENE_NAME}'
-        ORDER BY ENTER_TIMESTAMP ASC
-        LIMIT 10
-    )
-    UNION ALL
-    (
-        SELECT
-            JOURNEY_ID,
-            ENTER_TIMESTAMP,
-            EXIT_TIMESTAMP,
-            CONCAT(IMAGE_URL, '${process.env.SAMDT_SAS_TOKEN}') as IMAGE_URL,
-            IS_VALIDATED,
-            SCENE_NAME,
-            SMALL_CIRCLE_ID,
-            COALESCE(VALIDATED_JOURNEY, '') AS VALIDATED_JOURNEY
-        FROM backlight_samdt
-        WHERE IS_VALIDATED <> TRUE AND ENTER_TIMESTAMP < '${ylane.ENTER_TIMESTAMP}' AND SCENE_NAME = '${ylane.SCENE_NAME}'
-        ORDER BY ENTER_TIMESTAMP DESC
-        LIMIT 10
-    )
-    UNION ALL
-    (
-        SELECT
-            JOURNEY_ID,
-            ENTER_TIMESTAMP,
-            EXIT_TIMESTAMP,
-            CONCAT(IMAGE_URL, '${process.env.SAMDT_SAS_TOKEN}') as IMAGE_URL,
-            IS_VALIDATED,
-            SCENE_NAME,
-            SMALL_CIRCLE_ID,
-            COALESCE(VALIDATED_JOURNEY, '') AS VALIDATED_JOURNEY
-        FROM backlight_samdt
-        WHERE IS_VALIDATED <> TRUE AND ENTER_TIMESTAMP > '${orderpoint.ENTER_TIMESTAMP}' AND SCENE_NAME = '${orderpoint.SCENE_NAME}'
-        ORDER BY ENTER_TIMESTAMP ASC
-        LIMIT 10
-    )
-    UNION ALL
-    (
-        SELECT
-            JOURNEY_ID,
-            ENTER_TIMESTAMP,
-            EXIT_TIMESTAMP,
-            CONCAT(IMAGE_URL, '${process.env.SAMDT_SAS_TOKEN}') as IMAGE_URL,
-            IS_VALIDATED,
-            SCENE_NAME,
-            SMALL_CIRCLE_ID,
-            COALESCE(VALIDATED_JOURNEY, '') AS VALIDATED_JOURNEY
-        FROM backlight_samdt
-        WHERE IS_VALIDATED <> TRUE AND ENTER_TIMESTAMP < '${orderpoint.ENTER_TIMESTAMP}' AND SCENE_NAME = '${orderpoint.SCENE_NAME}'
-        ORDER BY ENTER_TIMESTAMP DESC
-        LIMIT 10
-    )
-    UNION ALL
-    (
-        SELECT
-            JOURNEY_ID,
-            ENTER_TIMESTAMP,
-            EXIT_TIMESTAMP,
-            CONCAT(IMAGE_URL, '${process.env.SAMDT_SAS_TOKEN}') as IMAGE_URL,
-            IS_VALIDATED,
-            SCENE_NAME,
-            SMALL_CIRCLE_ID,
-            COALESCE(VALIDATED_JOURNEY, '') AS VALIDATED_JOURNEY
-        FROM backlight_samdt
-        WHERE IS_VALIDATED <> TRUE AND ENTER_TIMESTAMP > '${entrance.ENTER_TIMESTAMP}' AND SCENE_NAME = '${entrance.SCENE_NAME}'
-        ORDER BY ENTER_TIMESTAMP ASC
-        LIMIT 10
-    )
-    UNION ALL
-    (
-        SELECT
-            JOURNEY_ID,
-            ENTER_TIMESTAMP,
-            EXIT_TIMESTAMP,
-            CONCAT(IMAGE_URL, '${process.env.SAMDT_SAS_TOKEN}') as IMAGE_URL,
-            IS_VALIDATED,
-            SCENE_NAME,
-            SMALL_CIRCLE_ID,
-            COALESCE(VALIDATED_JOURNEY, '') AS VALIDATED_JOURNEY
-        FROM backlight_samdt
-        WHERE IS_VALIDATED <> TRUE AND ENTER_TIMESTAMP < '${entrance.ENTER_TIMESTAMP}' AND SCENE_NAME = '${entrance.SCENE_NAME}'
-        ORDER BY ENTER_TIMESTAMP DESC
-        LIMIT 10
-    )
-    `, (err, rows) => {
+    if (parseDataScenes.length !== req.query.tableColumns) {
+        let sourceData = parsedData[0];
+        req.query.tableColumns.forEach((col) => {
+            let colD = JSON.parse(col);
+            if (!parseDataScenes.includes(colD.sceneName)) { // manually add data when specfic scene does not exist
+                parsedData.push({
+                    ...sourceData,
+                    SCENE_NAME: colD.sceneName
+                })
+            }
+        })
+    }
+
+    let generatedQuery = parsedData.map((journey_item, index) => {
+        return `
+            ${index === 0 ? '' : 'UNION ALL'}
+            (
+                SELECT
+                    JOURNEY_ID,
+                    ENTER_TIMESTAMP,
+                    EXIT_TIMESTAMP,
+                    CONCAT(IMAGE_URL, '${process.env.SAMDT_SAS_TOKEN}') as IMAGE_URL,
+                    IS_VALIDATED,
+                    SCENE_NAME,
+                    SMALL_CIRCLE_ID,
+                    ORDER_INDEX,
+                    COALESCE(VALIDATED_JOURNEY, '') AS VALIDATED_JOURNEY
+                FROM backlight_samdt
+                WHERE
+                    IS_VALIDATED <> TRUE AND
+                    ENTER_TIMESTAMP > '${journey_item.ENTER_TIMESTAMP || journey_item.VALIDATED_ENTER_TIMESTAMP}' AND
+                    SCENE_NAME = '${journey_item.SCENE_NAME}' AND
+                    IMAGE_URL IS NOT NULL
+                order by ENTER_TIMESTAMP ASC
+                LIMIT 10
+            )
+            UNION ALL
+            (
+                SELECT
+                    JOURNEY_ID,
+                    ENTER_TIMESTAMP,
+                    EXIT_TIMESTAMP,
+                    CONCAT(IMAGE_URL, '${process.env.SAMDT_SAS_TOKEN}') as IMAGE_URL,
+                    IS_VALIDATED,
+                    SCENE_NAME,
+                    SMALL_CIRCLE_ID,
+                    ORDER_INDEX,
+                    COALESCE(VALIDATED_JOURNEY, '') AS VALIDATED_JOURNEY
+                FROM backlight_samdt
+                WHERE
+                    IS_VALIDATED <> TRUE AND
+                    ENTER_TIMESTAMP < '${journey_item.ENTER_TIMESTAMP || journey_item.VALIDATED_ENTER_TIMESTAMP}' AND
+                    SCENE_NAME = '${journey_item.SCENE_NAME}' AND
+                    IMAGE_URL IS NOT NULL
+                order by ENTER_TIMESTAMP DESC
+                LIMIT 10
+            )
+        `
+    }).join('');
+
+    snowflake_client.execute_query(generatedQuery, (err, rows) => {
         if (err) {
             console.log('error executing snowflake query -', err);
             res.status(500).json({
@@ -299,7 +312,6 @@ router.get("/samdt_edit_list", async (req, res) => {
             });
         }
 
-        console.log('hehe')
         res.status(200).json({
             rows: groupedItems,
             message: "Success",
@@ -325,80 +337,61 @@ router.post("/sync_data_to_manifest", async (req, res) => {
     })
 })
 
+router.get("/get_network_options", async (req, res) => {
+    snowflake_client.execute_query(`
+        SELECT DISTINCT ARRAY_AGG(DISTINCT network_name) AS networks
+        FROM backlight_samdt;
+    `, (err, result) => {
+        if (err) {
+            res.status(500).json({
+                message: "error fetching",
+            });
+        }
+        
+        res.status(200).json({
+            message: "Success",
+            data: result[0]
+        });
+    })
+})
+
+router.get("/get_site_options", async (req, res) => {
+    let network = req.query.network;
+    snowflake_client.execute_query(`
+        SELECT DISTINCT ARRAY_AGG(DISTINCT site_name) AS sites
+        FROM backlight_samdt
+        WHERE network_name = '${network}'
+    `, (err, result) => {
+        if (err) {
+            res.status(500).json({
+                message: "error fetching",
+            });
+        }
+        
+        console.log('result', result);
+        res.status(200).json({
+            message: "Success",
+            data: result[0]
+        });
+    })
+})
+
+router.post("/invalidate_data", async (req, res) => {
+    let payload = req.body.body;
+    snowflake_client.execute_query(`
+        UPDATE backlight_samdt
+        SET VALIDATED_JOURNEY = null, IS_VALIDATED = false
+        WHERE VALIDATED_JOURNEY = '${payload.journey_id}'
+    `, (err, result) => {
+        if (err) {
+            res.status(500).json({
+                message: "error updating",
+            });
+        }
+        res.status(200).json({
+            message: "Success"
+        });
+    })
+})
+
 module.exports = router;
-
-// const db = require("../databricks");
-// var SAS_TOKEN = process.env.SAS_TOKEN;
-
-// router.get("/:page", async (req, res) => {
-//     const filters = {
-//         serial_id: req.query.serial_id || undefined,
-//         date: req.query.date || undefined,
-//         network: req.query.network || undefined,
-//         serviceApplet: req.query.serviceApplet || undefined,
-//         resultType: req.query.resultType || undefined,
-//     };
-
-//     const sortType = req.query.sortType === '2' ? 'date_created' : 'timestamp';
-
-//     let debug_mode = req.query.serial_id === 'debug_mode';
-
-//     let filters_query = [];
-//     Object.keys(filters).forEach(d => {
-//         if (filters[d] && filters[d] !== undefined) {
-//             if (d === 'serial_id') {
-//                 filters_query.push(`and sq.serial_id = '${filters[d]}'`)
-//             } else if (d === 'date') {
-//                 filters_query.push(`and sq.stage_timestamp < '${filters[d]}'`)
-//             } else if (d === 'network') {
-//                 filters_query.push(`and network_id = ${filters[d]}`)
-//             } else if (d === 'serviceApplet') {
-//                 filters_query.push(`and sa_type = '${filters[d].toUpperCase()}'`)
-//             } else if (d === 'resultType') {
-//                 if (filters[d] === '1') {
-//                     filters_query.push(`and message = 'Success'`)
-//                 } else if (filters[d] === '2') {
-//                     filters_query.push(`and message in ('No face Detected', 'No Face Detected')`)
-//                 }
-//             }
-//         }
-//     })
-//     try {
-//         let data = await db.execute_query(`
-//         SELECT
-//             sq.attributes,
-//             sq.timestamp,
-//             sq.serial_id,
-//             sq.bbox,
-//             sq.delta_id,
-//             concat(sq.image_url, '${SAS_TOKEN}') as image_url,
-//             sq.small_circle_id,
-//             sq.message,
-//             sq.date_created,
-//             sq.final_bbox,
-//             sq.stage_timestamp,
-//             sq.sa_type,
-//             sq.network_id,
-//             sq.bbox_used,
-//             sq.all_bbox
-//         FROM bronze.vianalite_snapper_results_v2_0 sq
-//         WHERE image_url is not null
-//         ${filters_query.join(" ")}
-//         ${req.query.lastItemCreatedAt
-//                 ? `and ${sortType} < '${req.query.lastItemCreatedAt}'`
-//                 : ""
-//             }
-//         ORDER BY ${sortType} desc
-//         LIMIT 100
-//     `);
-//         res.status(200).json({
-//             detections: data,
-//             message: "Success",
-//         });
-//     } catch (error) {
-//         console.log("errorrr ", error);
-//         res.status(500).json({
-//             message: error.message,
-//         });
-//     }
-// });
