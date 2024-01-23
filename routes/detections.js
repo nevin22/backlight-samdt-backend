@@ -16,6 +16,7 @@ router.get("/samdt_list", async (req, res) => {
             JOURNEY_ID,
             ARRAY_AGG(
             OBJECT_CONSTRUCT(
+                'BA_TYPE', BA_TYPE,
                 'JOURNEY_ID', JOURNEY_ID,
                 'ENTER_TIMESTAMP', ENTER_TIMESTAMP,
                 'EXIT_TIMESTAMP', EXIT_TIMESTAMP,
@@ -40,7 +41,7 @@ router.get("/samdt_list", async (req, res) => {
             AND NETWORK_NAME = '${filters.network}'
             AND SITE_NAME = '${filters.site}'
         GROUP BY JOURNEY_ID
-        ORDER BY MAX(CASE WHEN ORDER_INDEX = 0 THEN ENTER_TIMESTAMP END) DESC
+        ORDER BY MAX(ENTER_TIMESTAMP) DESC
     `, (err, rows) => {
         if (err) {
             console.log('error executing snowflake query -', err);
@@ -72,7 +73,6 @@ router.get("/samdt_list", async (req, res) => {
 
         let table_columns = tableColumns(filteredRows);
         let tableColumnNames = table_columns.map(d => d.sceneName);
-        
         filteredRows.forEach(data => { // if kulang ang row ug isa ka item.. butngan natog skeleton lang 
             if (data.DATA.length !== tableColumnNames.length) {
                 let dataScenes = data.DATA.map( d => d.SCENE_NAME);
@@ -93,7 +93,6 @@ router.get("/samdt_list", async (req, res) => {
                 })
             }
         })
-        
         validatedFlattenedDataList.forEach((validatedData) => {
             let toUpdateIndex = filteredRows.findIndex(d => d.JOURNEY_ID === validatedData.VALIDATED_JOURNEY);
             let dataIndex =  filteredRows[toUpdateIndex].DATA.findIndex(d => ((d.JOURNEY_ID === validatedData.VALIDATED_JOURNEY) && (d.SCENE_NAME === validatedData.SCENE_NAME)));
@@ -106,7 +105,8 @@ router.get("/samdt_list", async (req, res) => {
                 VALIDATED_JOURNEY: validatedData.VALIDATED_JOURNEY, // this is for frontend purpose only
                 IS_VALIDATED_FULL_JOURNEY: true, // this is for frontend purpose only
                 IS_FOR_PUBLISH_FULL_JOURNEY: validatedData.FOR_PUBLISH, // this is for frontend purpose only
-                NO_DATA: false
+                NO_DATA: false,
+                BA_TYPE: validatedData.BA_TYPE
             }
         })
 
@@ -144,19 +144,25 @@ router.post("/validate_data", async (req, res) => {
     let payload = req.body.body;
 
     console.log('payload', payload);
+
+    let isBalk = payload.isBalk;
+
+    let eventType = payload.eventType || 'Warm Exit';
+
     if (payload.isValidated === true) { // meaning gina revalidate
         // first remove tong iyang gipang validate pra ma lisdan
         snowflake_client.execute_query(`
             UPDATE backlight_samdt
-            SET VALIDATED_JOURNEY = null, IS_VALIDATED = false
+            SET VALIDATED_JOURNEY = null, IS_VALIDATED = false, BALK = null
             WHERE VALIDATED_JOURNEY = '${payload.selected_data.JOURNEY_ID}'
         `, (err, result) => {
             // update daun
             let fov_names = Object.keys(payload.small_circle_ids)
             let sm_ids = fov_names.map(d => payload.small_circle_ids[`${d}`])
+            
             snowflake_client.execute_query(`
                 UPDATE backlight_samdt
-                SET VALIDATED_JOURNEY = '${payload.selected_data.JOURNEY_ID}', IS_VALIDATED = true
+                SET VALIDATED_JOURNEY = '${payload.selected_data.JOURNEY_ID}', IS_VALIDATED = true, BA_TYPE = '${eventType}'
                 WHERE small_circle_id in (${sm_ids.map(value => `'${value}'`).join(', ')})
             `, (err, result) => {
                 if (err) {
@@ -166,6 +172,7 @@ router.post("/validate_data", async (req, res) => {
                     SELECT
                         JOURNEY_ID,
                         ENTER_TIMESTAMP,
+                        BA_TYPE,
                         EXIT_TIMESTAMP,
                         CONCAT(IMAGE_URL, '${process.env.SAMDT_SAS_TOKEN}') as IMAGE_URL,
                         ENTER_TIMESTAMP as VALIDATED_ENTER_TIMESTAMP,
@@ -175,6 +182,7 @@ router.post("/validate_data", async (req, res) => {
                         SCENE_NAME,
                         SMALL_CIRCLE_ID,
                         ORDER_INDEX,
+                        VALIDATED_JOURNEY,
                         true as IS_VALIDATED_FULL_JOURNEY
                     FROM backlight_samdt
                     WHERE small_circle_id in (${sm_ids.map(value => `'${value}'`).join(', ')});
@@ -191,7 +199,7 @@ router.post("/validate_data", async (req, res) => {
         let sm_ids = fov_names.map(d => payload.small_circle_ids[`${d}`])
         snowflake_client.execute_query(`
             UPDATE backlight_samdt
-            SET VALIDATED_JOURNEY = '${payload.selected_data.JOURNEY_ID}', IS_VALIDATED = true
+            SET VALIDATED_JOURNEY = '${payload.selected_data.JOURNEY_ID}', IS_VALIDATED = true, BA_TYPE = '${eventType}'
             WHERE small_circle_id in (${sm_ids.map(value => `'${value}'`).join(', ')})
         `, (err, result) => {
             if (err) {
@@ -200,6 +208,7 @@ router.post("/validate_data", async (req, res) => {
             snowflake_client.execute_query(`
                 SELECT
                     JOURNEY_ID,
+                    BA_TYPE,
                     ENTER_TIMESTAMP,
                     EXIT_TIMESTAMP,
                     CONCAT(IMAGE_URL, '${process.env.SAMDT_SAS_TOKEN}') as IMAGE_URL,
@@ -210,6 +219,7 @@ router.post("/validate_data", async (req, res) => {
                     SCENE_NAME,
                     SMALL_CIRCLE_ID,
                     ORDER_INDEX,
+                    VALIDATED_JOURNEY,
                     true as IS_VALIDATED_FULL_JOURNEY
                 FROM backlight_samdt
                 WHERE small_circle_id in (${sm_ids.map(value => `'${value}'`).join(', ')});
@@ -380,7 +390,7 @@ router.post("/invalidate_data", async (req, res) => {
     let payload = req.body.body;
     snowflake_client.execute_query(`
         UPDATE backlight_samdt
-        SET VALIDATED_JOURNEY = null, IS_VALIDATED = false
+        SET VALIDATED_JOURNEY = null, IS_VALIDATED = false, BA_TYPE = null
         WHERE VALIDATED_JOURNEY = '${payload.journey_id}'
     `, (err, result) => {
         if (err) {
