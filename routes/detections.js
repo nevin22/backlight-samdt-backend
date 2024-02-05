@@ -27,7 +27,8 @@ router.get("/samdt_list", async (req, res) => {
                 'BBOX', BBOX,
                 'FOR_PUBLISH', FOR_PUBLISH,
                 'VALIDATED_JOURNEY', COALESCE(VALIDATED_JOURNEY, ''),
-                'ORDER_INDEX', ORDER_INDEX
+                'ORDER_INDEX', ORDER_INDEX,
+                'IS_BA', IS_BA
             )
             ) AS data
         FROM backlight_samdt
@@ -183,6 +184,7 @@ router.post("/validate_data", async (req, res) => {
                         SMALL_CIRCLE_ID,
                         ORDER_INDEX,
                         VALIDATED_JOURNEY,
+                        IS_BA,
                         true as IS_VALIDATED_FULL_JOURNEY
                     FROM backlight_samdt
                     WHERE small_circle_id in (${sm_ids.map(value => `'${value}'`).join(', ')});
@@ -220,6 +222,7 @@ router.post("/validate_data", async (req, res) => {
                     SMALL_CIRCLE_ID,
                     ORDER_INDEX,
                     VALIDATED_JOURNEY,
+                    IS_BA,
                     true as IS_VALIDATED_FULL_JOURNEY
                 FROM backlight_samdt
                 WHERE small_circle_id in (${sm_ids.map(value => `'${value}'`).join(', ')});
