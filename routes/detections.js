@@ -300,6 +300,7 @@ router.get("/samdt_edit_list", async (req, res) => {
         `
     }).join('');
 
+    console.log('generatedQuery', generatedQuery)
     snowflake_client.execute_query(generatedQuery, (err, rows) => {
         if (err) {
             console.log('error executing snowflake query -', err);
