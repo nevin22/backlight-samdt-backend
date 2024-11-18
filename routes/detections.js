@@ -6,6 +6,7 @@ const snowflake_client = require('../snowflake');
 router.get("/samdt_list", async (req, res) => {
     let filters = (req.query.filters && JSON.parse(req.query.filters)) || undefined;
 
+    console.log('filters.site', filters.site)
     if (filters === undefined) {
         res.status(500).json({
             message: "No filter"
@@ -17,6 +18,7 @@ router.get("/samdt_list", async (req, res) => {
             ARRAY_AGG(
             OBJECT_CONSTRUCT(
                 'BA_TYPE', BA_TYPE,
+                'ATTRIBUTES', ATTRIBUTES,
                 'JOURNEY_ID', JOURNEY_ID,
                 'ENTER_TIMESTAMP', ENTER_TIMESTAMP,
                 'EXIT_TIMESTAMP', EXIT_TIMESTAMP,
@@ -25,6 +27,7 @@ router.get("/samdt_list", async (req, res) => {
                 'SCENE_NAME', SCENE_NAME,
                 'SMALL_CIRCLE_ID', SMALL_CIRCLE_ID,
                 'BBOX', BBOX,
+                'FINAL_BBOX', COALESCE(FINAL_BBOX, 'N/A'),
                 'FOR_PUBLISH', FOR_PUBLISH,
                 'VALIDATED_JOURNEY', COALESCE(VALIDATED_JOURNEY, ''),
                 'ORDER_INDEX', ORDER_INDEX,
@@ -44,78 +47,78 @@ router.get("/samdt_list", async (req, res) => {
         GROUP BY JOURNEY_ID
         ORDER BY MAX(ENTER_TIMESTAMP) DESC
     `, (err, rows) => {
-        if (err) {
-            console.log('error executing snowflake query -', err);
-            res.status(500).json({
-                message: "Internal server error"
-            });
-        }
-        let validatedFlattenedDataList = rows.reduce((accumulator, journey) => {
-            const validatedEntries = journey.DATA.filter(entry => entry.IS_VALIDATED);
-            return accumulator.concat(validatedEntries);
-        }, []);
+            if (err) {
+                console.log('error executing snowflake query -', err);
+                res.status(500).json({
+                    message: "Internal server error"
+                });
+            }
+            let validatedFlattenedDataList = rows.reduce((accumulator, journey) => {
+                const validatedEntries = journey.DATA.filter(entry => entry.IS_VALIDATED);
+                return accumulator.concat(validatedEntries);
+            }, []);
 
-        let filteredRows = rows.filter(d => d.JOURNEY_ID !== null); // removed ang mga walay journey_id kay maguba ang list (igo ra sya gyd gi gamit pra ma add sa validated na data)
+            let filteredRows = rows.filter(d => d.JOURNEY_ID !== null); // removed ang mga walay journey_id kay maguba ang list (igo ra sya gyd gi gamit pra ma add sa validated na data)
 
-        // filteredRows.forEach((journey) => {
-        //     // verify if validated
-        //     if (journey.DATA.find(d => d.IS_VALIDATED)) { // check lang any sa data if naay validated
-        //         console.log('journey.DATA', journey.DATA)
-        //         journey.DATA.forEach((dataObj) => {
-        //             let validatedData = validatedFlattenedDataList.find((v) => ((v.VALIDATED_JOURNEY === dataObj.JOURNEY_ID) && (v.SCENE_NAME === dataObj.SCENE_NAME)))
-        //             console.log('dataObj', dataObj)
-        //             console.log('validatedData', validatedData)
-        //             dataObj.VALIDATED_IMAGE_URL = validatedData.IMAGE_URL;
-        //             dataObj.VALIDATED_ENTER_TIMESTAMP = validatedData.ENTER_TIMESTAMP;
-        //             dataObj.VALIDATED_EXIT_TIMESTAMP = validatedData.EXIT_TIMESTAMP;
-        //         })
-        //     }
-        // });
+            // filteredRows.forEach((journey) => {
+            //     // verify if validated
+            //     if (journey.DATA.find(d => d.IS_VALIDATED)) { // check lang any sa data if naay validated
+            //         console.log('journey.DATA', journey.DATA)
+            //         journey.DATA.forEach((dataObj) => {
+            //             let validatedData = validatedFlattenedDataList.find((v) => ((v.VALIDATED_JOURNEY === dataObj.JOURNEY_ID) && (v.SCENE_NAME === dataObj.SCENE_NAME)))
+            //             console.log('dataObj', dataObj)
+            //             console.log('validatedData', validatedData)
+            //             dataObj.VALIDATED_IMAGE_URL = validatedData.IMAGE_URL;
+            //             dataObj.VALIDATED_ENTER_TIMESTAMP = validatedData.ENTER_TIMESTAMP;
+            //             dataObj.VALIDATED_EXIT_TIMESTAMP = validatedData.EXIT_TIMESTAMP;
+            //         })
+            //     }
+            // });
+            let table_columns = tableColumns(filteredRows);
+            let tableColumnNames = table_columns.map(d => d.sceneName);
+            filteredRows.forEach(data => { // if kulang ang row ug isa ka item.. butngan natog skeleton lang 
+                if (data.DATA.length !== tableColumnNames.length) {
+                    let dataScenes = data.DATA.map(d => d.SCENE_NAME);
+                    const scenesNotInTableColumns = tableColumnNames.filter(item => !dataScenes.includes(item));
 
-        let table_columns = tableColumns(filteredRows);
-        let tableColumnNames = table_columns.map(d => d.sceneName);
-        filteredRows.forEach(data => { // if kulang ang row ug isa ka item.. butngan natog skeleton lang 
-            if (data.DATA.length !== tableColumnNames.length) {
-                let dataScenes = data.DATA.map( d => d.SCENE_NAME);
-                const scenesNotInTableColumns = tableColumnNames.filter(item => !dataScenes.includes(item));
-
-                scenesNotInTableColumns.forEach(d => {
-                    data.DATA.push({
-                        ...data.DATA[0],
-                        SMALL_CIRCLE_ID: undefined,
-                        IMAGE_URL: undefined,
-                        ENTER_TIMESTAMP: undefined,
-                        EXIT_TIMESTAMP: undefined,
-                        VALIDATED_JOURNEY: undefined,
-                        SCENE_NAME: d,
-                        ORDER_INDEX: table_columns.find(d2 => d2.sceneName === d).index,
-                        NO_DATA: true
+                    scenesNotInTableColumns.forEach(d => {
+                        data.DATA.push({
+                            ...data.DATA[0],
+                            SMALL_CIRCLE_ID: undefined,
+                            IMAGE_URL: undefined,
+                            ENTER_TIMESTAMP: undefined,
+                            EXIT_TIMESTAMP: undefined,
+                            VALIDATED_JOURNEY: undefined,
+                            SCENE_NAME: d,
+                            ORDER_INDEX: table_columns.find(d2 => d2.sceneName === d).index,
+                            NO_DATA: true
+                        })
                     })
-                })
-            }
-        })
-        validatedFlattenedDataList.forEach((validatedData) => {
-            let toUpdateIndex = filteredRows.findIndex(d => d.JOURNEY_ID === validatedData.VALIDATED_JOURNEY);
-            let dataIndex =  filteredRows[toUpdateIndex].DATA.findIndex(d => ((d.JOURNEY_ID === validatedData.VALIDATED_JOURNEY) && (d.SCENE_NAME === validatedData.SCENE_NAME)));
-            filteredRows[toUpdateIndex].DATA[dataIndex] = {
-                ...filteredRows[toUpdateIndex].DATA[dataIndex],
-                VALIDATED_IMAGE_URL: validatedData.IMAGE_URL,
-                VALIDATED_ENTER_TIMESTAMP: validatedData.ENTER_TIMESTAMP,
-                VALIDATED_EXIT_TIMESTAMP: validatedData.EXIT_TIMESTAMP,
-                IS_VALIDATED: true, // this is for frontend purpose only
-                VALIDATED_JOURNEY: validatedData.VALIDATED_JOURNEY, // this is for frontend purpose only
-                IS_VALIDATED_FULL_JOURNEY: true, // this is for frontend purpose only
-                IS_FOR_PUBLISH_FULL_JOURNEY: validatedData.FOR_PUBLISH, // this is for frontend purpose only
-                NO_DATA: false,
-                BA_TYPE: validatedData.BA_TYPE
-            }
-        })
+                }
+            })
 
-        res.status(200).json({
-            detections: filteredRows,
-            message: "Success",
-        });
-    })
+            validatedFlattenedDataList.forEach((validatedData) => {
+                let toUpdateIndex = filteredRows.findIndex(d => d.JOURNEY_ID === validatedData.VALIDATED_JOURNEY);
+                let dataIndex = filteredRows[toUpdateIndex].DATA.findIndex(d => ((d.JOURNEY_ID === validatedData.VALIDATED_JOURNEY) && (d.SCENE_NAME === validatedData.SCENE_NAME)));
+                filteredRows[toUpdateIndex].DATA[dataIndex] = {
+                    ...filteredRows[toUpdateIndex].DATA[dataIndex],
+                    VALIDATED_IMAGE_URL: validatedData.IMAGE_URL,
+                    VALIDATED_ENTER_TIMESTAMP: validatedData.ENTER_TIMESTAMP,
+                    VALIDATED_EXIT_TIMESTAMP: validatedData.EXIT_TIMESTAMP,
+                    IS_VALIDATED: true, // this is for frontend purpose only
+                    VALIDATED_JOURNEY: validatedData.VALIDATED_JOURNEY, // this is for frontend purpose only
+                    IS_VALIDATED_FULL_JOURNEY: true, // this is for frontend purpose only
+                    IS_FOR_PUBLISH_FULL_JOURNEY: validatedData.FOR_PUBLISH, // this is for frontend purpose only
+                    NO_DATA: false,
+                    BA_TYPE: validatedData.BA_TYPE,
+                }
+            })
+
+            res.status(200).json({
+                detections: filteredRows,
+                message: "Success",
+            });
+        })
     }
 
 })
@@ -144,8 +147,6 @@ let tableColumns = (filteredRows) => {
 router.post("/validate_data", async (req, res) => {
     let payload = req.body.body;
 
-    console.log('payload', payload);
-
     let isBalk = payload.isBalk;
 
     let eventType = payload.eventType || 'Warm Exit';
@@ -160,7 +161,7 @@ router.post("/validate_data", async (req, res) => {
             // update daun
             let fov_names = Object.keys(payload.small_circle_ids)
             let sm_ids = fov_names.map(d => payload.small_circle_ids[`${d}`])
-            
+
             snowflake_client.execute_query(`
                 UPDATE backlight_samdt
                 SET VALIDATED_JOURNEY = '${payload.selected_data.JOURNEY_ID}', IS_VALIDATED = true, BA_TYPE = '${eventType}'
@@ -259,6 +260,7 @@ router.get("/samdt_edit_list", async (req, res) => {
             (
                 SELECT
                     JOURNEY_ID,
+                    ATTRIBUTES,
                     ENTER_TIMESTAMP,
                     EXIT_TIMESTAMP,
                     CONCAT(IMAGE_URL, '${process.env.SAMDT_SAS_TOKEN}') as IMAGE_URL,
@@ -266,13 +268,16 @@ router.get("/samdt_edit_list", async (req, res) => {
                     SCENE_NAME,
                     SMALL_CIRCLE_ID,
                     ORDER_INDEX,
+                    BBOX,
+                    FINAL_BBOX,
                     COALESCE(VALIDATED_JOURNEY, '') AS VALIDATED_JOURNEY
                 FROM backlight_samdt
                 WHERE
                     IS_VALIDATED <> TRUE AND
                     ENTER_TIMESTAMP > '${journey_item.ENTER_TIMESTAMP || journey_item.VALIDATED_ENTER_TIMESTAMP}' AND
                     SCENE_NAME = '${journey_item.SCENE_NAME}' AND
-                    IMAGE_URL IS NOT NULL
+                    IMAGE_URL IS NOT NULL AND
+                    IMAGE_URL != ''
                 order by ENTER_TIMESTAMP ASC
                 LIMIT 10
             )
@@ -280,6 +285,7 @@ router.get("/samdt_edit_list", async (req, res) => {
             (
                 SELECT
                     JOURNEY_ID,
+                    ATTRIBUTES,
                     ENTER_TIMESTAMP,
                     EXIT_TIMESTAMP,
                     CONCAT(IMAGE_URL, '${process.env.SAMDT_SAS_TOKEN}') as IMAGE_URL,
@@ -287,20 +293,22 @@ router.get("/samdt_edit_list", async (req, res) => {
                     SCENE_NAME,
                     SMALL_CIRCLE_ID,
                     ORDER_INDEX,
+                    BBOX,
+                    FINAL_BBOX,
                     COALESCE(VALIDATED_JOURNEY, '') AS VALIDATED_JOURNEY
                 FROM backlight_samdt
                 WHERE
                     IS_VALIDATED <> TRUE AND
                     ENTER_TIMESTAMP < '${journey_item.ENTER_TIMESTAMP || journey_item.VALIDATED_ENTER_TIMESTAMP}' AND
                     SCENE_NAME = '${journey_item.SCENE_NAME}' AND
-                    IMAGE_URL IS NOT NULL
+                    IMAGE_URL IS NOT NULL AND
+                    IMAGE_URL != ''
                 order by ENTER_TIMESTAMP DESC
                 LIMIT 10
             )
         `
     }).join('');
 
-    console.log('generatedQuery', generatedQuery)
     snowflake_client.execute_query(generatedQuery, (err, rows) => {
         if (err) {
             console.log('error executing snowflake query -', err);
@@ -334,20 +342,24 @@ router.get("/samdt_edit_list", async (req, res) => {
 })
 
 router.post("/sync_data_to_manifest", async (req, res) => {
+    let payload = req.body.body;
+
     snowflake_client.execute_query(`
         UPDATE backlight_samdt
         SET FOR_PUBLISH = true
-        WHERE IS_VALIDATED = true;
+        WHERE IS_VALIDATED = true
+        ${payload.startTime ? ` AND (ENTER_TIMESTAMP BETWEEN '${payload.startTime}' AND '${payload.endTime}')` : ''}
     `, (err, result) => {
         if (err) {
             console.log('error', err);
             res.status(500).json({
                 message: "error updating",
             });
+        } else {
+            res.status(200).json({
+                message: "Success",
+            });
         }
-        res.status(200).json({
-            message: "Success",
-        });
     })
 })
 
@@ -361,7 +373,7 @@ router.get("/get_network_options", async (req, res) => {
                 message: "error fetching",
             });
         }
-        
+
         res.status(200).json({
             message: "Success",
             data: result[0]
@@ -381,8 +393,6 @@ router.get("/get_site_options", async (req, res) => {
                 message: "error fetching",
             });
         }
-        
-        console.log('result', result);
         res.status(200).json({
             message: "Success",
             data: result[0]
@@ -402,9 +412,33 @@ router.post("/invalidate_data", async (req, res) => {
                 message: "error updating",
             });
         }
-        res.status(200).json({
-            message: "Success"
-        });
+
+        snowflake_client.execute_query(`
+            SELECT
+                JOURNEY_ID,
+                BA_TYPE,
+                ENTER_TIMESTAMP,
+                EXIT_TIMESTAMP,
+                CONCAT(IMAGE_URL, '${process.env.SAMDT_SAS_TOKEN}') as IMAGE_URL,
+                ENTER_TIMESTAMP as VALIDATED_ENTER_TIMESTAMP,
+                EXIT_TIMESTAMP as EXIT_ENTER_TIMESTAMP,
+                CONCAT(IMAGE_URL, '${process.env.SAMDT_SAS_TOKEN}') as VALIDATED_IMAGE_URL,
+                IS_VALIDATED,
+                SCENE_NAME,
+                SMALL_CIRCLE_ID,
+                ORDER_INDEX,
+                VALIDATED_JOURNEY,
+                IS_BA,
+                false as IS_VALIDATED_FULL_JOURNEY
+            FROM backlight_samdt
+            WHERE JOURNEY_ID = '${payload.journey_id}'
+        `, (err, result2) => {
+            res.status(200).json({
+                updatedData: result2,
+                message: "Success",
+            });
+        })
+
     })
 })
 
