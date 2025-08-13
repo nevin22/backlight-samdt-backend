@@ -372,7 +372,7 @@ router.get("/samdt_edit_list", async (req, res) => {
                     IMAGE_URL IS NOT NULL AND
                     IMAGE_URL != ''
                 order by ENTER_TIMESTAMP ASC
-                LIMIT 10
+                LIMIT 20
             )
             UNION ALL
             (
@@ -404,7 +404,7 @@ router.get("/samdt_edit_list", async (req, res) => {
                     IMAGE_URL IS NOT NULL AND
                     IMAGE_URL != ''
                 order by ENTER_TIMESTAMP DESC
-                LIMIT 10
+                LIMIT 20
             )
         `
     }).join('');
