@@ -2,6 +2,34 @@ var express = require("express");
 var router = express.Router();
 var moment = require('moment');
 const snowflake_client = require('../snowflake');
+const { Storage } = require('@google-cloud/storage');
+
+const storage = new Storage({
+    keyFilename: process.env.GCP_STORAGE_KEY
+});
+
+async function generateSignedUrl(fileName) {
+    const bucketName = process.env.GCP_BUCKET_DEV;
+    const options = {
+        version: 'v4',
+        action: 'read',
+        expires: Date.now() + 15 * 60 * 1000, // 15 minutes
+    };
+    console.log('bwisit')
+    const [url] = await storage
+        .bucket(bucketName)
+        .file(fileName)
+        .getSignedUrl(options);
+
+    return url;
+}
+
+function getObjectPath(gcsUrl) {
+    const match = gcsUrl.match(/https?:\/\/storage\.googleapis\.com\/[^\/]+\/(.+)/);
+    if (!match) throw new Error('Invalid GCS URL format');
+    return decodeURIComponent(match[1]);
+}
+
 
 router.get("/samdt_list", async (req, res) => {
     let filters = (req.query.filters && JSON.parse(req.query.filters)) || undefined;
@@ -20,13 +48,7 @@ router.get("/samdt_list", async (req, res) => {
                 'JOURNEY_ID', JOURNEY_ID,
                 'ENTER_TIMESTAMP', ENTER_TIMESTAMP,
                 'EXIT_TIMESTAMP', EXIT_TIMESTAMP,
-                'IMAGE_URL', CONCAT(
-                    COALESCE(gnc_result, IMAGE_URL),
-                    CASE 
-                        WHEN gnc_result IS NOT NULL THEN '${process.env.SAMDT_SAS_TOKEN}'
-                        ELSE '${process.env.SAMDT_SAS_TOKEN_AXIS}'
-                    END
-                ),
+                'IMAGE_URL', COALESCE(gnc_result, IMAGE_URL),
                 'IS_VALIDATED', IS_VALIDATED,
                 'SCENE_NAME', SCENE_NAME,
                 'SMALL_CIRCLE_ID', SMALL_CIRCLE_ID,
@@ -50,48 +72,22 @@ router.get("/samdt_list", async (req, res) => {
             AND SITE_NAME = '${filters.site}'
         GROUP BY JOURNEY_ID
         ORDER BY MAX(ENTER_TIMESTAMP) DESC
-    `, (err, rows) => {
+    `, async (err, rows) => {
             if (err) {
                 console.log('error executing snowflake query -', err);
                 res.status(500).json({
                     message: "Internal server error"
                 });
             }
-            // filter out katong mga naay validated journey id pero wala nay ga match sa iyang orignal journey_id meaning na pili na sa lahi na session tanan niya data
-            // let rows_copy = [...rows]
-            // rows_copy = rows.filter(row => {
-            //     const allDataAreValidated = row.DATA.every(dataItem => dataItem.VALIDATED_JOURNEY !== (null || ""));
-                
-            //     // if atleast isa ka data kay naay null na validated_journey .. goods ra sya i return
-            //     if (!allDataAreValidated) return true;
-                
-            //     // Otherwise, check if at least one `VALIDATED_JOURNEY` matches the `JOURNEY_ID`.
-            //     return row.DATA.some(dataItem => dataItem.VALIDATED_JOURNEY === row.JOURNEY_ID);
-            // });
-
-            // console.log('before -', rows.length, ' -- ', 'after -', rows_copy.length);
-
             let validatedFlattenedDataList = rows.reduce((accumulator, journey) => {
                 const validatedEntries = journey.DATA.filter(entry => entry.IS_VALIDATED);
                 return accumulator.concat(validatedEntries);
             }, []);
 
-            let filteredRows = rows.filter(d => d.JOURNEY_ID !== null); // removed ang mga walay journey_id kay maguba ang list (igo ra sya gyd gi gamit pra ma add sa validated na data)
 
-            // filteredRows.forEach((journey) => {
-            //     // verify if validated
-            //     if (journey.DATA.find(d => d.IS_VALIDATED)) { // check lang any sa data if naay validated
-            //         console.log('journey.DATA', journey.DATA)
-            //         journey.DATA.forEach((dataObj) => {
-            //             let validatedData = validatedFlattenedDataList.find((v) => ((v.VALIDATED_JOURNEY === dataObj.JOURNEY_ID) && (v.SCENE_NAME === dataObj.SCENE_NAME)))
-            //             console.log('dataObj', dataObj)
-            //             console.log('validatedData', validatedData)
-            //             dataObj.VALIDATED_IMAGE_URL = validatedData.IMAGE_URL;
-            //             dataObj.VALIDATED_ENTER_TIMESTAMP = validatedData.ENTER_TIMESTAMP;
-            //             dataObj.VALIDATED_EXIT_TIMESTAMP = validatedData.EXIT_TIMESTAMP;
-            //         })
-            //     }
-            // });
+            // let test = await generateSignedUrl(getObjectPath('https://storage.googleapis.com/bkt-viana-dev-vianagncstoragedev/samdt/2025-08-04/Q2UV-FREJ-RTQY-42db21db.png'))
+
+            let filteredRows = rows.filter(d => d.JOURNEY_ID !== null); // removed ang mga walay journey_id kay maguba ang list (igo ra sya gyd gi gamit pra ma add sa validated na data)
             let table_columns = tableColumns(filteredRows);
             let tableColumnNames = table_columns.map(d => d.sceneName);
             filteredRows.forEach(data => { // if kulang ang row ug isa ka item.. butngan natog skeleton lang 
@@ -132,9 +128,31 @@ router.get("/samdt_list", async (req, res) => {
                 }
             })
 
-            // remove sessions where all of its values are assigned to another session
-            // console.log('filteredRows', filteredRows.find(d => d.JOURNEY_ID = '9873427c-1d9f-4afd-b6e9-54d7a7aedb16'))
+            // sign image urls
+            filteredRows = await Promise.all(
+                filteredRows.map(async (row) => ({
+                    ...row,
+                    DATA: await Promise.all(
+                        row.DATA.map(async (item) => {
+                            if (!item.IMAGE_URL) return item;
+                            try {
+                                const image_url_signedUrl = await generateSignedUrl(getObjectPath(item.IMAGE_URL));
 
+                                let validated_image_url_signed = item.VALIDATED_IMAGE_URL;
+
+                                if (validated_image_url_signed) {
+                                    validated_image_url_signed = await generateSignedUrl(getObjectPath(item.VALIDATED_IMAGE_URL))
+                                }
+
+                                return { ...item, IMAGE_URL: image_url_signedUrl, VALIDATED_IMAGE_URL: validated_image_url_signed };
+                            } catch (e) {
+                                console.error("Failed to sign URL:", item.IMAGE_URL, e);
+                                return item; // keep original if signing fails
+                            }
+                        })
+                    ),
+                }))
+            );
             res.status(200).json({
                 detections: filteredRows,
                 message: "Success",
@@ -169,7 +187,7 @@ router.post("/validate_data", async (req, res) => {
     let payload = req.body.body;
     let isBalk = payload.isBalk;
     let eventType = payload.eventType || 'Warm Exit';
-    
+
     let fov_names = Object.keys(payload.small_circle_ids)
     let sm_ids = fov_names.map(d => payload.small_circle_ids[`${d}`])
 
@@ -201,22 +219,10 @@ router.post("/validate_data", async (req, res) => {
                         BA_TYPE,
                         ENTER_TIMESTAMP,
                         EXIT_TIMESTAMP,
-                        CONCAT(
-                            COALESCE(GNC_RESULT, IMAGE_URL),
-                            CASE 
-                                WHEN GNC_RESULT IS NOT NULL THEN '${process.env.SAMDT_SAS_TOKEN}'
-                                ELSE '${process.env.SAMDT_SAS_TOKEN_AXIS}'
-                            END
-                        ) AS IMAGE_URL,
+                        COALESCE(GNC_RESULT, IMAGE_URL) AS IMAGE_URL,
                         ENTER_TIMESTAMP AS VALIDATED_ENTER_TIMESTAMP,
                         EXIT_TIMESTAMP AS EXIT_ENTER_TIMESTAMP,
-                        CONCAT(
-                            COALESCE(GNC_RESULT, IMAGE_URL),
-                            CASE 
-                                WHEN GNC_RESULT IS NOT NULL THEN '${process.env.SAMDT_SAS_TOKEN}'
-                                ELSE '${process.env.SAMDT_SAS_TOKEN_AXIS}'
-                            END
-                        ) AS VALIDATED_IMAGE_URL,
+                        COALESCE(GNC_RESULT, IMAGE_URL) AS VALIDATED_IMAGE_URL,
                         IS_VALIDATED,
                         SCENE_NAME,
                         SMALL_CIRCLE_ID,
@@ -226,101 +232,33 @@ router.post("/validate_data", async (req, res) => {
                         TRUE AS IS_VALIDATED_FULL_JOURNEY
                     FROM backlight_samdt
                     WHERE small_circle_id IN (${sm_ids.map(value => `'${value}'`).join(', ')});
-                `, (err, result2) => {
+                `, async (err, result2) => {
+
+                    let mutable_result = result2 ? [...result2] : [];
+
+
+                    // sign image url
+                    mutable_result = await Promise.all(
+                        mutable_result.map(async (row) => {
+                            if (row.IMAGE_URL) {
+                                const signedUrl = await generateSignedUrl(getObjectPath(row.IMAGE_URL));
+                                return {
+                                    ...row,
+                                    IMAGE_URL: signedUrl,
+                                    VALIDATED_IMAGE_URL: signedUrl,
+                                };
+                            }
+                            return row;
+                        })
+                    );
                     res.status(200).json({
-                        updatedData: result2,
+                        updatedData: mutable_result,
                         message: "Success",
                     });
                 })
             })
         }
     })
-
-
-    // if (payload.isValidated === true) { // meaning gina revalidate
-    //     // first remove tong iyang gipang validate pra ma lisdan
-    //     snowflake_client.execute_query(`
-    //         UPDATE backlight_samdt
-    //         SET VALIDATED_JOURNEY = null, IS_VALIDATED = false, BALK = null
-    //         WHERE VALIDATED_JOURNEY = '${payload.selected_data.JOURNEY_ID}'
-    //     `, (err, result) => {
-    //         // update daun
-    //         let fov_names = Object.keys(payload.small_circle_ids)
-    //         let sm_ids = fov_names.map(d => payload.small_circle_ids[`${d}`])
-
-    //         snowflake_client.execute_query(`
-    //             UPDATE backlight_samdt
-    //             SET VALIDATED_JOURNEY = '${payload.selected_data.JOURNEY_ID}', IS_VALIDATED = true, BA_TYPE = '${eventType}'
-    //             WHERE small_circle_id in (${sm_ids.map(value => `'${value}'`).join(', ')})
-    //         `, (err, result) => {
-    //             if (err) {
-    //                 console.log('error executing snowflake query -', err);
-    //             }
-    //             snowflake_client.execute_query(`
-    //                 SELECT
-    //                     JOURNEY_ID,
-    //                     ENTER_TIMESTAMP,
-    //                     BA_TYPE,
-    //                     EXIT_TIMESTAMP,
-    //                     CONCAT(IMAGE_URL, '${process.env.SAMDT_SAS_TOKEN}') as IMAGE_URL,
-    //                     ENTER_TIMESTAMP as VALIDATED_ENTER_TIMESTAMP,
-    //                     EXIT_TIMESTAMP as EXIT_ENTER_TIMESTAMP,
-    //                     CONCAT(IMAGE_URL, '${process.env.SAMDT_SAS_TOKEN}') as VALIDATED_IMAGE_URL,
-    //                     IS_VALIDATED,
-    //                     SCENE_NAME,
-    //                     SMALL_CIRCLE_ID,
-    //                     ORDER_INDEX,
-    //                     VALIDATED_JOURNEY,
-    //                     IS_BA,
-    //                     true as IS_VALIDATED_FULL_JOURNEY
-    //                 FROM backlight_samdt
-    //                 WHERE small_circle_id in (${sm_ids.map(value => `'${value}'`).join(', ')});
-    //             `, (err, result2) => {
-    //                 res.status(200).json({
-    //                     updatedData: result2,
-    //                     message: "Success",
-    //                 });
-    //             })
-    //         })
-    //     })
-    // } else {
-    //     let fov_names = Object.keys(payload.small_circle_ids)
-    //     let sm_ids = fov_names.map(d => payload.small_circle_ids[`${d}`])
-    //     snowflake_client.execute_query(`
-    //         UPDATE backlight_samdt
-    //         SET VALIDATED_JOURNEY = '${payload.selected_data.JOURNEY_ID}', IS_VALIDATED = true, BA_TYPE = '${eventType}'
-    //         WHERE small_circle_id in (${sm_ids.map(value => `'${value}'`).join(', ')})
-    //     `, (err, result) => {
-    //         if (err) {
-    //             console.log('error executing snowflake query -', err);
-    //         }
-    //         snowflake_client.execute_query(`
-    //             SELECT
-    //                 JOURNEY_ID,
-    //                 BA_TYPE,
-    //                 ENTER_TIMESTAMP,
-    //                 EXIT_TIMESTAMP,
-    //                 CONCAT(IMAGE_URL, '${process.env.SAMDT_SAS_TOKEN}') as IMAGE_URL,
-    //                 ENTER_TIMESTAMP as VALIDATED_ENTER_TIMESTAMP,
-    //                 EXIT_TIMESTAMP as EXIT_ENTER_TIMESTAMP,
-    //                 CONCAT(IMAGE_URL, '${process.env.SAMDT_SAS_TOKEN}') as VALIDATED_IMAGE_URL,
-    //                 IS_VALIDATED,
-    //                 SCENE_NAME,
-    //                 SMALL_CIRCLE_ID,
-    //                 ORDER_INDEX,
-    //                 VALIDATED_JOURNEY,
-    //                 IS_BA,
-    //                 true as IS_VALIDATED_FULL_JOURNEY
-    //             FROM backlight_samdt
-    //             WHERE small_circle_id in (${sm_ids.map(value => `'${value}'`).join(', ')});
-    //         `, (err, result2) => {
-    //             res.status(200).json({
-    //                 updatedData: result2,
-    //                 message: "Success",
-    //             });
-    //         })
-    //     })
-    // }
 })
 
 router.get("/samdt_edit_list", async (req, res) => {
@@ -349,13 +287,7 @@ router.get("/samdt_edit_list", async (req, res) => {
                     ATTRIBUTES,
                     ENTER_TIMESTAMP,
                     EXIT_TIMESTAMP,
-                    CONCAT(
-                        COALESCE(GNC_RESULT, IMAGE_URL),
-                        CASE 
-                            WHEN GNC_RESULT IS NOT NULL THEN '${process.env.SAMDT_SAS_TOKEN}'
-                            ELSE '${process.env.SAMDT_SAS_TOKEN_AXIS}'
-                        END
-                    ) AS IMAGE_URL,
+                    COALESCE(GNC_RESULT, IMAGE_URL) AS IMAGE_URL,
                     IS_VALIDATED,
                     SCENE_NAME,
                     SMALL_CIRCLE_ID,
@@ -381,13 +313,7 @@ router.get("/samdt_edit_list", async (req, res) => {
                     ATTRIBUTES,
                     ENTER_TIMESTAMP,
                     EXIT_TIMESTAMP,
-                    CONCAT(
-                        COALESCE(GNC_RESULT, IMAGE_URL),
-                        CASE 
-                            WHEN GNC_RESULT IS NOT NULL THEN '${process.env.SAMDT_SAS_TOKEN}'
-                            ELSE '${process.env.SAMDT_SAS_TOKEN_AXIS}'
-                        END
-                    ) AS IMAGE_URL,
+                    COALESCE(GNC_RESULT, IMAGE_URL) AS IMAGE_URL,
                     IS_VALIDATED,
                     SCENE_NAME,
                     SMALL_CIRCLE_ID,
@@ -409,7 +335,7 @@ router.get("/samdt_edit_list", async (req, res) => {
         `
     }).join('');
 
-    snowflake_client.execute_query(generatedQuery, (err, rows) => {
+    snowflake_client.execute_query(generatedQuery, async (err, rows) => {
         if (err) {
             console.log('error executing snowflake query -', err);
             res.status(500).json({
@@ -418,8 +344,22 @@ router.get("/samdt_edit_list", async (req, res) => {
         }
 
         let items = [...rows];
+        // sign image URL
+        items = await Promise.all(
+            items.map(async (row) => {
+                if (row.IMAGE_URL) {
+                    const signedUrl = await generateSignedUrl(getObjectPath(row.IMAGE_URL));
+                    return {
+                        ...row,
+                        IMAGE_URL: signedUrl
+                    };
+                }
+                return row;
+            })
+        );
+
         // Group journeys by SCENE_NAME
-        const groupedItems = items.reduce((acc, journey) => {
+        let groupedItems = items.reduce((acc, journey) => {
             if (!acc[journey.SCENE_NAME]) {
                 acc[journey.SCENE_NAME] = [];
             }
