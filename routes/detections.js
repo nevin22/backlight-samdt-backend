@@ -61,10 +61,10 @@ router.get("/samdt_list", async (req, res) => {
             // let rows_copy = [...rows]
             // rows_copy = rows.filter(row => {
             //     const allDataAreValidated = row.DATA.every(dataItem => dataItem.VALIDATED_JOURNEY !== (null || ""));
-                
+
             //     // if atleast isa ka data kay naay null na validated_journey .. goods ra sya i return
             //     if (!allDataAreValidated) return true;
-                
+
             //     // Otherwise, check if at least one `VALIDATED_JOURNEY` matches the `JOURNEY_ID`.
             //     return row.DATA.some(dataItem => dataItem.VALIDATED_JOURNEY === row.JOURNEY_ID);
             // });
@@ -169,7 +169,7 @@ router.post("/validate_data", async (req, res) => {
     let payload = req.body.body;
     let isBalk = payload.isBalk;
     let eventType = payload.eventType || 'Warm Exit';
-    
+
     let fov_names = Object.keys(payload.small_circle_ids)
     let sm_ids = fov_names.map(d => payload.small_circle_ids[`${d}`])
 
@@ -322,6 +322,83 @@ router.post("/validate_data", async (req, res) => {
     //     })
     // }
 })
+
+router.post("/validate_multiple_data", async (req, res) => {
+    const payload = req.body.body;
+    const eventsToUpdate = payload.events;
+
+    const values = eventsToUpdate.flatMap(event =>
+        event.DATA.map(id => `('${event.JOURNEY_ID}', '${id}')`)
+    );
+
+    const all_smids = eventsToUpdate.flatMap(d => d.DATA.map(smid => smid))
+
+    const query = `
+        UPDATE backlight_samdt t
+        SET validated_journey = m.journey_id,
+            is_validated = TRUE,
+            ba_type = 'Warm Exit'
+        FROM (
+            SELECT column1::string AS journey_id,
+                   column2::string AS small_circle_id
+            FROM VALUES ${values.join(", ")}
+        ) m
+        WHERE t.small_circle_id = m.small_circle_id
+    `;
+
+    snowflake_client.execute_query(query, (err, result) => {
+        if (err) console.error("Error updating:", err);
+        snowflake_client.execute_query(`
+            SELECT
+                JOURNEY_ID,
+                BA_TYPE,
+                ENTER_TIMESTAMP,
+                EXIT_TIMESTAMP,
+                CONCAT(
+                    COALESCE(GNC_RESULT, IMAGE_URL),
+                    CASE 
+                        WHEN GNC_RESULT IS NOT NULL THEN '${process.env.SAMDT_SAS_TOKEN}'
+                        ELSE '${process.env.SAMDT_SAS_TOKEN_AXIS}'
+                    END
+                ) AS IMAGE_URL,
+                ENTER_TIMESTAMP AS VALIDATED_ENTER_TIMESTAMP,
+                EXIT_TIMESTAMP AS EXIT_ENTER_TIMESTAMP,
+                CONCAT(
+                    COALESCE(GNC_RESULT, IMAGE_URL),
+                    CASE 
+                        WHEN GNC_RESULT IS NOT NULL THEN '${process.env.SAMDT_SAS_TOKEN}'
+                        ELSE '${process.env.SAMDT_SAS_TOKEN_AXIS}'
+                    END
+                ) AS VALIDATED_IMAGE_URL,
+                IS_VALIDATED,
+                SCENE_NAME,
+                SMALL_CIRCLE_ID,
+                ORDER_INDEX,
+                VALIDATED_JOURNEY,
+                IS_BA,
+                TRUE AS IS_VALIDATED_FULL_JOURNEY
+            FROM backlight_samdt
+            WHERE small_circle_id IN (${all_smids.map(value => `'${value}'`).join(', ')});`,
+            (err, result2) => {
+                const groups = {};
+                for (const item of result2) {
+                    if (!groups[item.JOURNEY_ID]) {
+                        groups[item.JOURNEY_ID] = { JOURNEY_ID: item.JOURNEY_ID, DATA: [] };
+                    }
+                    groups[item.JOURNEY_ID].DATA.push(item);
+                }
+                const grouped = [];
+                for (const key in groups) {
+                    grouped.push(groups[key]);
+                }
+                res.status(200).json({
+                    updatedData: grouped,
+                    message: "Success",
+                });
+            }
+        )
+    });
+});
 
 router.get("/samdt_edit_list", async (req, res) => {
     let parsedData = req.query.data.map(d => JSON.parse(d))
