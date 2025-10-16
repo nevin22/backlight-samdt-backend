@@ -1,9 +1,9 @@
 node_modules
 firestore.json
-gcp_dey_dev.json
-gcp_dey_staging.json
-gcp_dey_ppd.json
-gcp_dey_prod.json
+gcp_key_dev.json
+gcp_key_staging.json
+gcp_key_ppd.json
+gcp_key_prod.json
 .vscode
 .adminbro
 keycloak-connect

@@ -8,14 +8,13 @@ const storage = new Storage({
     keyFilename: process.env.GCP_STORAGE_KEY
 });
 
-async function generateSignedUrl(fileName) {
-    const bucketName = process.env.GCP_BUCKET_DEV;
+async function generateSignedUrl(fileName, subtype) {
+    const bucketName = subtype === 'axis' ? process.env.GCP_BUCKET_DEV_AXIS : process.env.GCP_BUCKET_DEV;
     const options = {
         version: 'v4',
         action: 'read',
         expires: Date.now() + 15 * 60 * 1000, // 15 minutes
     };
-    console.log('bwisit')
     const [url] = await storage
         .bucket(bucketName)
         .file(fileName)
@@ -57,7 +56,8 @@ router.get("/samdt_list", async (req, res) => {
                 'FOR_PUBLISH', FOR_PUBLISH,
                 'VALIDATED_JOURNEY', COALESCE(VALIDATED_JOURNEY, ''),
                 'ORDER_INDEX', ORDER_INDEX,
-                'IS_BA', IS_BA
+                'IS_BA', IS_BA,
+                'SUBTYPE', SUBTYPE
             )
             ) AS data
         FROM backlight_samdt
@@ -125,9 +125,9 @@ router.get("/samdt_list", async (req, res) => {
                     IS_FOR_PUBLISH_FULL_JOURNEY: validatedData.FOR_PUBLISH, // this is for frontend purpose only
                     NO_DATA: false,
                     BA_TYPE: validatedData.BA_TYPE,
+                    SUBTYPE: validatedData.SUBTYPE
                 }
             })
-
             // sign image urls
             filteredRows = await Promise.all(
                 filteredRows.map(async (row) => ({
@@ -136,12 +136,12 @@ router.get("/samdt_list", async (req, res) => {
                         row.DATA.map(async (item) => {
                             if (!item.IMAGE_URL) return item;
                             try {
-                                const image_url_signedUrl = await generateSignedUrl(getObjectPath(item.IMAGE_URL));
+                                const image_url_signedUrl = await generateSignedUrl(getObjectPath(item.IMAGE_URL), item.SUBTYPE);
 
                                 let validated_image_url_signed = item.VALIDATED_IMAGE_URL;
 
                                 if (validated_image_url_signed) {
-                                    validated_image_url_signed = await generateSignedUrl(getObjectPath(item.VALIDATED_IMAGE_URL))
+                                    validated_image_url_signed = await generateSignedUrl(getObjectPath(item.VALIDATED_IMAGE_URL), item.SUBTYPE)
                                 }
 
                                 return { ...item, IMAGE_URL: image_url_signedUrl, VALIDATED_IMAGE_URL: validated_image_url_signed };
@@ -228,6 +228,7 @@ router.post("/validate_data", async (req, res) => {
                         SMALL_CIRCLE_ID,
                         ORDER_INDEX,
                         VALIDATED_JOURNEY,
+                        SUBTYPE,
                         IS_BA,
                         TRUE AS IS_VALIDATED_FULL_JOURNEY
                     FROM backlight_samdt
@@ -241,7 +242,7 @@ router.post("/validate_data", async (req, res) => {
                     mutable_result = await Promise.all(
                         mutable_result.map(async (row) => {
                             if (row.IMAGE_URL) {
-                                const signedUrl = await generateSignedUrl(getObjectPath(row.IMAGE_URL));
+                                const signedUrl = await generateSignedUrl(getObjectPath(row.IMAGE_URL), row.SUBTYPE);
                                 return {
                                     ...row,
                                     IMAGE_URL: signedUrl,
@@ -294,6 +295,7 @@ router.get("/samdt_edit_list", async (req, res) => {
                     ORDER_INDEX,
                     BBOX,
                     FINAL_BBOX,
+                    SUBTYPE,
                     COALESCE(VALIDATED_JOURNEY, '') AS VALIDATED_JOURNEY
                 FROM backlight_samdt
                 WHERE
@@ -320,6 +322,7 @@ router.get("/samdt_edit_list", async (req, res) => {
                     ORDER_INDEX,
                     BBOX,
                     FINAL_BBOX,
+                    SUBTYPE,
                     COALESCE(VALIDATED_JOURNEY, '') AS VALIDATED_JOURNEY
                 FROM backlight_samdt
                 WHERE
@@ -348,7 +351,7 @@ router.get("/samdt_edit_list", async (req, res) => {
         items = await Promise.all(
             items.map(async (row) => {
                 if (row.IMAGE_URL) {
-                    const signedUrl = await generateSignedUrl(getObjectPath(row.IMAGE_URL));
+                    const signedUrl = await generateSignedUrl(getObjectPath(row.IMAGE_URL), row.SUBTYPE);
                     return {
                         ...row,
                         IMAGE_URL: signedUrl
