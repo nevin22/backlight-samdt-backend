@@ -346,9 +346,22 @@ router.post("/validate_multiple_data", async (req, res) => {
         WHERE t.small_circle_id = m.small_circle_id
     `;
 
-    snowflake_client.execute_query(query, (err, result) => {
-        if (err) console.error("Error updating:", err);
-        snowflake_client.execute_query(`
+    snowflake_client.execute_query(`
+        select * from backlight_samdt where small_circle_id in (${all_smids.map(value => `'${value}'`).join(', ')});
+    `, (err, result) => {
+        if (err) {
+            console.log('error executing snowflake query -', err);
+        }
+        let validated_items = result.filter(r => r.IS_VALIDATED)
+        if (validated_items.length) { // if naa gyud then return ang error with message pra kabalo ang user
+            res.status(500).json({
+                message: `Validation Error!\n\nThese SMID/s includes data that has already been validated.\n[ ${validated_items.map(d => d.SMALL_CIRCLE_ID).join(", ")} ].
+                `,
+            });
+        } else {
+            snowflake_client.execute_query(query, (err, result) => {
+                if (err) console.error("Error updating:", err);
+                snowflake_client.execute_query(`
             SELECT
                 JOURNEY_ID,
                 BA_TYPE,
@@ -379,25 +392,27 @@ router.post("/validate_multiple_data", async (req, res) => {
                 TRUE AS IS_VALIDATED_FULL_JOURNEY
             FROM backlight_samdt
             WHERE small_circle_id IN (${all_smids.map(value => `'${value}'`).join(', ')});`,
-            (err, result2) => {
-                const groups = {};
-                for (const item of result2) {
-                    if (!groups[item.JOURNEY_ID]) {
-                        groups[item.JOURNEY_ID] = { JOURNEY_ID: item.JOURNEY_ID, DATA: [] };
+                    (err, result2) => {
+                        const groups = {};
+                        for (const item of result2) {
+                            if (!groups[item.JOURNEY_ID]) {
+                                groups[item.JOURNEY_ID] = { JOURNEY_ID: item.JOURNEY_ID, DATA: [] };
+                            }
+                            groups[item.JOURNEY_ID].DATA.push(item);
+                        }
+                        const grouped = [];
+                        for (const key in groups) {
+                            grouped.push(groups[key]);
+                        }
+                        res.status(200).json({
+                            updatedData: grouped,
+                            message: "Success",
+                        });
                     }
-                    groups[item.JOURNEY_ID].DATA.push(item);
-                }
-                const grouped = [];
-                for (const key in groups) {
-                    grouped.push(groups[key]);
-                }
-                res.status(200).json({
-                    updatedData: grouped,
-                    message: "Success",
-                });
-            }
-        )
-    });
+                )
+            });
+        }
+    })
 });
 
 router.get("/samdt_edit_list", async (req, res) => {
